@@ -1,0 +1,81 @@
+name: Build DarsYar (Windows installer)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Extract source zip
+        shell: pwsh
+        run: |
+          $z = Get-ChildItem -Filter "DarsYar-Source*.zip" | Select-Object -First 1
+          if (-not $z) { throw "ZIP file DarsYar-Source*.zip not found in repository root" }
+          Expand-Archive -Path $z.FullName -DestinationPath src -Force
+          Get-ChildItem src
+
+      - name: Restore
+        working-directory: src
+        run: dotnet restore DarsYar.sln
+
+      - name: Build (Debug)
+        working-directory: src
+        run: dotnet build DarsYar.sln -c Debug --no-restore
+
+      - name: Build (Release)
+        working-directory: src
+        run: dotnet build DarsYar.sln -c Release --no-restore
+
+      - name: Unit tests
+        working-directory: src
+        continue-on-error: true
+        run: dotnet test DarsYar.Tests/DarsYar.Tests.csproj -c Release --no-build --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
+
+      - name: Publish (self-contained, win-x64)
+        working-directory: src
+        run: dotnet publish DarsYar/DarsYar.csproj -c Release -r win-x64 --self-contained true -p:DebugType=none -o publish
+
+      - name: Portable zip
+        working-directory: src
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path publish\* -DestinationPath dist\DarsYar-Portable.zip -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        working-directory: src
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\DarsYar.iss
+          Get-ChildItem dist
+
+      - name: Source zip
+        shell: pwsh
+        run: |
+          $z = Get-ChildItem $env:GITHUB_WORKSPACE -Filter "DarsYar-Source*.zip" | Select-Object -First 1
+          Copy-Item $z.FullName src\dist\DarsYar-Source.zip
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: DarsYar-Windows
+          path: src/dist/*
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: TestResults
+          path: src/TestResults/*
+          if-no-files-found: ignore
